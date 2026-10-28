@@ -39,6 +39,7 @@ def build_policy_metadata(policy: Any) -> dict[str, Any]:
         "supports_timed_chunks": True,
         "supports_rtc": bool(getattr(policy, "supports_rtc", False)),
         "supports_simple": bool(getattr(policy, "supports_simple", False)),
+        "supports_train": bool(getattr(policy, "supports_train", False)),
     }
     attributes = (
         "control_dt",
@@ -55,6 +56,7 @@ def build_policy_metadata(policy: Any) -> dict[str, Any]:
         "action_infer_mode",
         "drop_top_view",
         "checkpoint_path",
+        "training_rtc_max_delay_steps",
     )
     for name in attributes:
         value = getattr(policy, name, None)
@@ -79,8 +81,8 @@ def validate_chunk_context(context: Any) -> dict[str, Any]:
     dt = context["control_dt"]
     if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
         raise ValueError("control_dt must be finite and positive")
-    if context["guidance_method"] not in ("none", "rtc", "simple"):
-        raise ValueError("guidance_method must be none, rtc or simple")
+    if context["guidance_method"] not in ("none", "rtc", "simple", "train"):
+        raise ValueError("guidance_method must be none, rtc, simple or train")
     actions = np.asarray(context["previous_actions"], dtype=np.float32)
     if actions.ndim != 2 or actions.shape[1] != 14 or not np.isfinite(actions).all():
         raise ValueError("previous_actions must be finite [L,14] physical actions")

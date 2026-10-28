@@ -121,6 +121,30 @@ def running_server(policy, legacy=False, wrong_id=False):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_training_rtc_capability_and_context_roundtrip(self):
+        class TrainingPolicy(Policy):
+            supports_train = True
+            supports_chunk_context = True
+
+            def select_action(self, obs, history=None, *, chunk_context=None):
+                self.context = chunk_context
+                return super().select_action(obs, history)
+
+        policy = TrainingPolicy()
+        with running_server(policy) as port, WebsocketClientPolicy(port=port, image_codec="raw") as client:
+            self.assertTrue(client.supports_train)
+            ctx = {**context(), "guidance_method": "train"}
+            action, _, _ = client.select_action(observation(), chunk_context=ctx)
+            self.assertEqual(action.shape, (20, 14))
+            self.assertEqual(policy.context["guidance_method"], "train")
+            np.testing.assert_array_equal(policy.context["previous_actions"], ctx["previous_actions"])
+        with (
+            running_server(Policy()) as port,
+            WebsocketClientPolicy(port=port, image_codec="raw") as client,
+            self.assertRaises(RemotePolicyError),
+        ):
+            client.require_guidance("train")
+
     def test_send_deadline_when_peer_stops_reading(self):
         # A TCP peer completes the handshake/metadata exchange, then never reads
         # the image payload. A protocol close frame also blocks behind sendall.

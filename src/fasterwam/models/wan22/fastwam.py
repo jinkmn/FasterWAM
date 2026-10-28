@@ -11,6 +11,11 @@ from .action_dit import ActionDiT
 from .helpers.loader import load_wan22_ti2v_5b_components
 from .mot import MoT
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
+from .training_rtc import (
+    TrainingRTCConfig,
+    prepare_training_actions,
+    suffix_loss_per_sample,
+)
 
 logger = get_logger(__name__)
 
@@ -39,8 +44,10 @@ class FastWAM(torch.nn.Module):
         loss_lambda_video: float = 1.0,
         loss_lambda_action: float = 1.0,
         mot_action_video_attention_layers: Optional[Sequence[int]] = None,
+        training_rtc: TrainingRTCConfig | None = None,
     ):
         super().__init__()
+        self.training_rtc = training_rtc or TrainingRTCConfig()
         self.video_expert = video_expert
         self.action_expert = action_expert
         self.mot = mot
@@ -552,7 +559,10 @@ class FastWAM(torch.nn.Module):
             device=self.device,
             dtype=action.dtype,
         )
-        noisy_action = self.train_action_scheduler.add_noise(action, noise_action, timestep_action)
+        noisy_action, action_token_timestep, rtc_prefix = prepare_training_actions(
+            action, noise_action, timestep_action, self.train_action_scheduler,
+            self.training_rtc, action_is_pad,
+        )
         target_action = self.train_action_scheduler.training_target(action, noise_action, timestep_action)
 
         video_pre = self.video_expert.pre_dit(
@@ -566,7 +576,7 @@ class FastWAM(torch.nn.Module):
 
         action_pre = self.action_expert.pre_dit(
             action_tokens=noisy_action,
-            timestep=timestep_action,
+            timestep=action_token_timestep,
             context=context,
             context_mask=context_mask,
         )
@@ -627,7 +637,11 @@ class FastWAM(torch.nn.Module):
         loss_video = (loss_video_per_sample * video_weight).mean()
 
         action_loss_token = F.mse_loss(pred_action.float(), target_action.float(), reduction="none").mean(dim=2) # [B, T]
-        if action_is_pad is not None:
+        if self.training_rtc.enabled:
+            action_loss_per_sample = suffix_loss_per_sample(
+                pred_action, target_action, rtc_prefix, action_is_pad
+            )
+        elif action_is_pad is not None:
             valid = (~action_is_pad).to(device=action_loss_token.device, dtype=action_loss_token.dtype)
             valid_sum = valid.sum(dim=1).clamp(min=1.0)
             action_loss_per_sample = (action_loss_token * valid).sum(dim=1) / valid_sum
@@ -644,6 +658,8 @@ class FastWAM(torch.nn.Module):
             "loss_video": self.loss_lambda_video * float(loss_video.detach().item()),
             "loss_action": self.loss_lambda_action * float(loss_action.detach().item()),
         }
+        if self.training_rtc.enabled:
+            loss_dict["rtc_prefix_steps"] = float(rtc_prefix.sum(dim=1).float().mean().item())
         return loss_total, loss_dict
 
     @torch.no_grad()

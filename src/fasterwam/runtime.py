@@ -15,6 +15,7 @@ from omegaconf import OmegaConf
 from .trainer import Wan22Trainer
 from .utils.logging_config import get_logger, setup_logging
 from .utils.video_io import save_mp4
+from .utils.pytorch_utils import set_global_seed
 from .utils import misc
 
 logger = get_logger(__name__)
@@ -266,8 +267,14 @@ def create_fasterwam(
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
+    training_rtc=None,
 ):
     from .models.wan22.fasterwam import FasterWAM
+    from .models.wan22.training_rtc import TrainingRTCConfig
+
+    if isinstance(training_rtc, DictConfig):
+        training_rtc = OmegaConf.to_container(training_rtc, resolve=True)
+    training_rtc = TrainingRTCConfig(**(training_rtc or {}))
 
     if isinstance(video_dit_config, DictConfig):
         video_dit_config = OmegaConf.to_container(video_dit_config, resolve=True)
@@ -337,6 +344,7 @@ def create_fasterwam(
         condition_layers=condition_layers,
         video_kv_fusion=video_kv_fusion,
         video_kv_fusion_init=str(video_kv_fusion_init),
+        training_rtc=training_rtc,
     )
 
 
@@ -381,6 +389,8 @@ def run_training(cfg: DictConfig):
     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
     model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
 
+    # Action-expert initialization and prefix/noise sampling must share the run seed.
+    set_global_seed(int(cfg.seed))
     model_init_start = time.perf_counter()
     model = instantiate(cfg.model, model_dtype=model_dtype, device=model_device)
     model_init_seconds = time.perf_counter() - model_init_start

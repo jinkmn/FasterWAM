@@ -267,3 +267,9 @@ The manifest records config/statistics SHA256, checkpoint path/size/mtime, model
 seed, device, effective RTC/simple settings, synthetic-data identity and timings.
 CPU verification does not establish real-checkpoint GPU memory/latency, real-robot
 performance improvements, or safe continuous operation. Validate those separately.
+
+## Training-time RTC
+
+The separate `train` method uses a checkpoint trained with clean action prefixes.
+See [training_rtc.md](training_rtc.md) for the data path, training config, launcher,
+and `configs/serve/train.yaml`. Existing inference-only guidance remains available.
