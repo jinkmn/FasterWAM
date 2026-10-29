@@ -50,13 +50,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rtc-max-guidance-weight", type=float, default=None)
     parser.add_argument("--simple", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--simple-prefix-schedule", choices=["exp", "linear", "ones", "zeros"], default=None)
+    parser.add_argument("--train-rtc", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args()
     settings = {}
     if args.serving_config is not None:
         with args.serving_config.open(encoding="utf-8") as stream:
             settings = yaml.safe_load(stream) or {}
         if not isinstance(settings, dict) or set(settings) - {
-            "rtc", "simple", "action_infer_mode", "num_inference_steps", "seed", "control_fps"
+            "rtc", "simple", "train", "action_infer_mode", "num_inference_steps", "seed", "control_fps"
         }:
             parser.error("Unknown serving configuration fields")
     rtc = settings.get("rtc", {})
@@ -75,6 +76,13 @@ def parse_args() -> argparse.Namespace:
         enabled=args.simple if args.simple is not None else simple.get("enabled", False),
         prefix_attention_schedule=args.simple_prefix_schedule or simple.get("prefix_attention_schedule", "exp"),
     )
+    train = settings.get("train", {})
+    if not isinstance(train, dict) or set(train) - {"enabled"}:
+        parser.error("Unknown training RTC serving fields")
+    if args.train_rtc is None:
+        args.train_rtc = train.get("enabled", False)
+    if type(args.train_rtc) is not bool:
+        parser.error("train.enabled must be a boolean")
     for key in ("action_infer_mode", "num_inference_steps", "seed", "control_fps"):
         if getattr(args, key) is None:
             setattr(args, key, settings.get(key, 42 if key == "seed" else None))
@@ -94,7 +102,8 @@ def main() -> None:
         norm_stats_path=args.norm_stats,
     )
     print(
-        f"[serve-widowxai] rtc={args.rtc_config} simple={args.simple_config} seed={args.seed}",
+        f"[serve-widowxai] rtc={args.rtc_config} simple={args.simple_config} "
+        f"train_rtc={args.train_rtc} seed={args.seed}",
         flush=True,
     )
     hostname = socket.gethostname()
@@ -122,6 +131,7 @@ def main() -> None:
         control_fps=args.control_fps,
         rtc_config=args.rtc_config,
         simple_config=args.simple_config,
+        train_rtc=args.train_rtc,
     )
     print(
         "[serve-widowxai] visual_input="

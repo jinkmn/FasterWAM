@@ -331,3 +331,6 @@ our paper:
   year    = {2026}
 }
 ```
+
+For training-time RTC, preprocessing details, and a portable training smoke launcher,
+see [docs/training_rtc.md](docs/training_rtc.md).

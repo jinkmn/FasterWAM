@@ -7,6 +7,7 @@ from fasterwam.utils.logging_config import get_logger
 from .fastwam import FastWAM
 from .rtc import RTCGuidance, rtc_corrected_flow
 from .simple import SimpleGuidance, simple_denoise_step
+from .training_rtc import TrainingRTCPrefix
 
 logger = get_logger(__name__)
 
@@ -138,10 +139,13 @@ class JointWAM(FastWAM):
         tiled: bool = False,
         rtc_guidance: RTCGuidance | None = None,
         simple_guidance: SimpleGuidance | None = None,
+        training_rtc_prefix: TrainingRTCPrefix | None = None,
     ) -> dict[str, Any]:
         self.eval()
-        if rtc_guidance is not None and simple_guidance is not None:
-            raise ValueError("rtc_guidance and simple_guidance are mutually exclusive")
+        if sum(value is not None for value in (rtc_guidance, simple_guidance, training_rtc_prefix)) > 1:
+            raise ValueError("rtc_guidance, simple_guidance and training_rtc_prefix are mutually exclusive")
+        if training_rtc_prefix is not None and not self.training_rtc.enabled:
+            raise ValueError("Training RTC inference requires a training-RTC model config")
         if (rtc_guidance is not None or simple_guidance is not None) and any(
             parameter.requires_grad for parameter in self.parameters()
         ):
@@ -250,6 +254,8 @@ class JointWAM(FastWAM):
         ):
             timestep_video = step_t_video.unsqueeze(0).to(dtype=latents_video.dtype, device=self.device)
             timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+            if training_rtc_prefix is not None:
+                latents_action, timestep_action = training_rtc_prefix.prepare(latents_action, timestep_action)
 
             if rtc_guidance is None:
                 pred_video_posi, pred_action_posi = self._predict_joint_noise(
@@ -289,6 +295,8 @@ class JointWAM(FastWAM):
                     step_t_action.float() / self.infer_action_scheduler.num_train_timesteps,
                     step_delta_action, simple_guidance,
                 )
+            if training_rtc_prefix is not None:
+                next_latents_action, _ = training_rtc_prefix.clamp(next_latents_action)
             latents_action = next_latents_action
             latents_video[:, :, 0:1] = first_frame_latents.clone()
 
@@ -315,11 +323,14 @@ class JointWAM(FastWAM):
         tiled: bool = False,
         rtc_guidance: RTCGuidance | None = None,
         simple_guidance: SimpleGuidance | None = None,
+        training_rtc_prefix: TrainingRTCPrefix | None = None,
     ) -> dict[str, Any]:
         del negative_prompt, text_cfg_scale
         self.eval()
-        if rtc_guidance is not None and simple_guidance is not None:
-            raise ValueError("rtc_guidance and simple_guidance are mutually exclusive")
+        if sum(value is not None for value in (rtc_guidance, simple_guidance, training_rtc_prefix)) > 1:
+            raise ValueError("rtc_guidance, simple_guidance and training_rtc_prefix are mutually exclusive")
+        if training_rtc_prefix is not None and not self.training_rtc.enabled:
+            raise ValueError("Training RTC inference requires a training-RTC model config")
         if (rtc_guidance is not None or simple_guidance is not None) and any(
             parameter.requires_grad for parameter in self.parameters()
         ):
@@ -454,6 +465,8 @@ class JointWAM(FastWAM):
         )
         for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
             timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+            if training_rtc_prefix is not None:
+                latents_action, timestep_action = training_rtc_prefix.prepare(latents_action, timestep_action)
             if rtc_guidance is None:
                 pred_action_posi = self._predict_action_noise_with_cache(
                     latents_action=latents_action,
@@ -486,6 +499,8 @@ class JointWAM(FastWAM):
                     step_t_action.float() / self.infer_action_scheduler.num_train_timesteps,
                     step_delta_action, simple_guidance,
                 )
+            if training_rtc_prefix is not None:
+                next_latents_action, _ = training_rtc_prefix.clamp(next_latents_action)
             latents_action = next_latents_action
 
         return {

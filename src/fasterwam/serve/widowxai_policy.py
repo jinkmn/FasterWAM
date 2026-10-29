@@ -19,6 +19,7 @@ from omegaconf import DictConfig, OmegaConf
 from fasterwam.datasets.dataset_utils import CenterCrop, Normalize, ResizeSmallestSideAspectPreserving
 from fasterwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from fasterwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
+from fasterwam.models.wan22.training_rtc import TrainingRTCConfig, TrainingRTCPrefix
 from fasterwam.models.wan22.rtc import RTCConfig, RTCGuidance
 from fasterwam.models.wan22.simple import SimpleConfig, SimpleGuidance
 from fasterwam.runtime import _mixed_precision_to_model_dtype, _normalize_mixed_precision
@@ -363,6 +364,7 @@ class WidowXAIFasterWAMPolicy:
         control_fps: float | None = None,
         rtc_config: RTCConfig | None = None,
         simple_config: SimpleConfig | None = None,
+        train_rtc: bool = False,
     ) -> None:
         self.rtc_config = rtc_config or RTCConfig()
         self.supports_rtc = self.rtc_config.enabled
@@ -376,6 +378,18 @@ class WidowXAIFasterWAMPolicy:
         )
         self.checkpoint_path = self.artifacts.checkpoint_path
         self.cfg = OmegaConf.load(self.artifacts.config_path)
+        trained_settings = self.cfg.model.get("training_rtc")
+        if isinstance(trained_settings, DictConfig):
+            trained_settings = OmegaConf.to_container(trained_settings, resolve=True)
+        trained_rtc = TrainingRTCConfig(**(trained_settings or {}))
+        if type(train_rtc) is not bool:
+            raise ValueError("train_rtc must be a boolean")
+        if train_rtc and not trained_rtc.enabled:
+            raise ValueError("Training RTC serving requires a run trained with model.training_rtc.simulated_delay")
+        self.supports_train = train_rtc
+        self.training_rtc_max_delay_steps = (
+            trained_rtc.simulated_delay - 1 if trained_rtc.enabled else None
+        )
         self.preprocessor = WidowXAIOnlinePreprocessor(self.cfg, self.artifacts.norm_stats_path)
         self.camera_names = self.preprocessor.camera_names
         self.drop_top_view = self.preprocessor.drop_top_view
@@ -452,6 +466,8 @@ class WidowXAIFasterWAMPolicy:
             raise TypeError(f"{self.action_infer_mode} does not accept rtc_guidance")
         if self.supports_simple and "simple_guidance" not in inspect.signature(infer_fn).parameters:
             raise TypeError(f"{self.action_infer_mode} does not accept simple_guidance")
+        if self.supports_train and "training_rtc_prefix" not in inspect.signature(infer_fn).parameters:
+            raise TypeError(f"{self.action_infer_mode} does not accept training_rtc_prefix")
         return infer_fn
 
     def _training_fps(self) -> float:
@@ -523,23 +539,33 @@ class WidowXAIFasterWAMPolicy:
         signature = inspect.signature(self._infer_fn)
         kwargs = {name: value for name, value in kwargs.items() if name in signature.parameters}
         method = chunk_context["guidance_method"] if chunk_context is not None else "none"
-        if method not in ("none", "rtc", "simple"):
+        if method not in ("none", "rtc", "simple", "train"):
             raise ValueError(f"Unknown guidance_method: {method}")
         if method != "none":
             if not getattr(self, f"supports_{method}", False):
                 raise ValueError(f"{method} is disabled by serving configuration")
             # Add guidance after the legacy filter; never silently drop it.
-            keyword = f"{method}_guidance"
+            keyword = "training_rtc_prefix" if method == "train" else f"{method}_guidance"
             if keyword not in signature.parameters:
                 raise TypeError(f"Inference path cannot accept {method} guidance")
             previous = self.preprocessor.normalize_previous_actions(
                 chunk_context["previous_actions"], obs["qpos"],
             )
-            guidance_type = RTCGuidance if method == "rtc" else SimpleGuidance
-            kwargs[keyword] = guidance_type(
-                previous.unsqueeze(0), chunk_context["inference_delay_steps"],
-                getattr(self, f"{method}_config"),
-            )
+            if method == "train":
+                delay = chunk_context["inference_delay_steps"]
+                if delay > self.training_rtc_max_delay_steps:
+                    print(
+                        f"[training-rtc] delay={delay} exceeds trained maximum "
+                        f"{self.training_rtc_max_delay_steps}; conditioning on available prefix",
+                        flush=True,
+                    )
+                kwargs[keyword] = TrainingRTCPrefix(previous.unsqueeze(0), delay)
+            else:
+                guidance_type = RTCGuidance if method == "rtc" else SimpleGuidance
+                kwargs[keyword] = guidance_type(
+                    previous.unsqueeze(0), chunk_context["inference_delay_steps"],
+                    getattr(self, f"{method}_config"),
+                )
         prediction = self._infer_fn(**kwargs)
         action = self.preprocessor.denormalize_action(prediction["action"], proprio)
         return action, "FASTERWAM", False
